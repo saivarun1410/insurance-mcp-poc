@@ -11,6 +11,11 @@ an internal chat surface) gets the same three tools with the same contracts.
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
 
+Built alongside [Microsoft Applied Skills: Integrate model context protocol tools with agents in
+Microsoft Foundry](https://learn.microsoft.com/api/credentials/share/en-us/VarunThupakula-1670/8851AA0DDD09A6F2?sharingId=3D36474C20E4579C).
+That assessment covers the client side — attaching an MCP tool to a Foundry agent and validating its
+calls. This repository is the other half: the server those tools come from.
+
 ## Quickstart
 
 Requires Docker and Node 20+.
