@@ -56,8 +56,13 @@ CREATE TABLE policy_documents (
     doc_type     TEXT NOT NULL,
     product_code TEXT REFERENCES products(product_code),
     content      TEXT NOT NULL,
-    embedding    vector(256)
+    embedding    vector(256),
+    -- Lexical half of hybrid retrieval. Maintained by Postgres, so it can never drift
+    -- out of sync with content the way a separately-populated column would.
+    content_tsv  tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || content)) STORED
 );
+
+CREATE INDEX ON policy_documents USING gin (content_tsv);
 
 -- Deliberately no ivfflat/HNSW index here. Approximate indexes only pay off once the corpus
 -- is large; over a handful of rows an ivfflat probe scans a near-empty partition and silently

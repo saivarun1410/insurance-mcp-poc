@@ -10,6 +10,7 @@
     "seed": "node scripts/seed.mjs",
     "start": "node src/index.js",
     "smoke": "node scripts/smoke.mjs",
+    "demo": "node scripts/demo.mjs",
     "setup": "npm run db:up && npm run seed && npm run smoke"
   },
   "license": "MIT",

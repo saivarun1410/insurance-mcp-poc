@@ -27,15 +27,43 @@ server.registerTool(
   },
   async ({ query: searchText, product_code, limit = 3 }) => {
     const embedding = toVectorLiteral(embed(searchText));
+    // Hybrid retrieval via Reciprocal Rank Fusion. Vector similarity catches paraphrase,
+    // full-text catches exact domain terms ("paramedical", "contestability"); either alone
+    // misranks on this corpus. RRF combines the two *rankings* rather than their scores,
+    // which matters because cosine similarity and ts_rank_cd live on incomparable scales —
+    // weighting the raw scores lets whichever one happens to be larger dominate.
     const rows = await query(
-      `SELECT doc_id, title, doc_type, product_code,
-              1 - (embedding <=> $1::vector) AS similarity,
-              content
-         FROM policy_documents
-        WHERE ($2::text IS NULL OR product_code = $2)
-        ORDER BY embedding <=> $1::vector
-        LIMIT $3`,
-      [embedding, product_code ?? null, limit],
+      `WITH filtered AS (
+         SELECT * FROM policy_documents
+          WHERE ($3::text IS NULL OR product_code = $3)
+       ),
+       -- websearch_to_tsquery ANDs every term, so a full-sentence question matches no
+       -- document and the hybrid search silently collapses to vector-only. Rewriting the
+       -- operators to OR makes the lexical side rank by how many query terms a document
+       -- contains, which is what we want as one half of a fusion.
+       q AS (
+         SELECT replace(websearch_to_tsquery('english', $2)::text, '&', '|')::tsquery AS tsq
+       ),
+       vector_ranked AS (
+         SELECT doc_id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+           FROM filtered
+       ),
+       text_ranked AS (
+         SELECT doc_id,
+                ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, (SELECT tsq FROM q)) DESC) AS rank
+           FROM filtered
+          WHERE content_tsv @@ (SELECT tsq FROM q)
+       )
+       SELECT f.doc_id, f.title, f.doc_type, f.product_code, f.content,
+              v.rank AS vector_rank,
+              t.rank AS text_rank,
+              COALESCE(1.0 / (60 + v.rank), 0) + COALESCE(1.0 / (60 + t.rank), 0) AS score
+         FROM filtered f
+         LEFT JOIN vector_ranked v ON v.doc_id = f.doc_id
+         LEFT JOIN text_ranked   t ON t.doc_id = f.doc_id
+        ORDER BY score DESC
+        LIMIT $4`,
+      [embedding, searchText, product_code ?? null, limit],
     );
 
     if (rows.length === 0) return text('No matching documents.');
@@ -46,7 +74,10 @@ server.registerTool(
         title: row.title,
         doc_type: row.doc_type,
         product_code: row.product_code,
-        similarity: Number(row.similarity.toFixed(4)),
+        score: Number(Number(row.score).toFixed(5)),
+        vector_rank: row.vector_rank,
+        text_rank: row.text_rank, // null when the document matched no query term
+
         excerpt: row.content.length > 600 ? `${row.content.slice(0, 600)}…` : row.content,
       })),
     );
