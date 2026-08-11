@@ -6,7 +6,7 @@ LLM agent can call.
 
 The point of the POC: an agent shouldn't need a bespoke integration per assistant. Implement the
 domain once as an MCP server, and any MCP-capable client (Claude Code, Microsoft Foundry agents,
-an internal chat surface) gets the same three tools with the same contracts.
+an internal chat surface) gets the same nine tools with the same contracts.
 
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
@@ -26,13 +26,19 @@ npm run setup     # starts Postgres+pgvector, seeds the corpus, runs the smoke t
 ```
 
 `npm run setup` is the whole demo: it stands up the database, embeds and inserts 12 documents, then
-connects to the MCP server as a real MCP client and exercises every tool. Expected tail:
+connects to the MCP server as a real MCP client and exercises all nine tools. Expected tail:
 
 ```
-Connected. Server exposes 3 tools:
+Connected. Server exposes 9 tools:
   - search_policy_documents: Search policy documents
   - get_application_status: Get application status
   - lookup_product_rules: Look up product rules
+  - find_applications: Find applications
+  - get_outstanding_requirements: Get outstanding requirements
+  - find_eligible_products: Find eligible products
+  - estimate_premium: Estimate premium
+  - get_underwriter_workload: Get underwriter workload
+  - add_case_note: Add case note
 ...
 All tool calls completed.
 ```
@@ -42,11 +48,43 @@ with `npm run db:down`.
 
 ## The tools
 
-| Tool | What it does |
+Nine tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
+`get_product` or `list_events` here — an agent that has to assemble answers from CRUD primitives
+burns turns and invents joins. Each tool below answers a question a person actually asks.
+
+**Case handling** — one known application
+
+| Tool | Answers |
 | --- | --- |
-| `search_policy_documents` | Vector search over contracts, riders, underwriting guidelines, and procedures. Optional `product_code` filter. Returns ranked excerpts with `doc_id` so answers can cite a source. |
-| `get_application_status` | Looks up an application by number; returns status, the step it is blocked on, assigned underwriter, and the full event timeline. |
-| `lookup_product_rules` | Returns issue limits and underwriting rules for a product. Given `applicant_age` / `face_amount` / `state`, also evaluates hard eligibility and reports which dimensions failed. |
+| `get_application_status` | "Where is APP-100242 and what is it waiting on?" Status, blocking step, underwriter, full event timeline. |
+| `get_outstanding_requirements` | "Why isn't it moving, and what do I chase today?" Open requirements with age in days, plus the follow-up action the procedure calls for at 14 / 28 / 90 days. |
+| `add_case_note` | "Record that I called the provider." The only writing tool. |
+
+**Pipeline** — across the whole book
+
+| Tool | Answers |
+| --- | --- |
+| `find_applications` | "What's stuck?" Filter by status, product, underwriter, state, or days untouched. |
+| `get_underwriter_workload` | "Who is overloaded?" Open cases, face amount at risk, oldest untouched case per underwriter. |
+
+**Sales and pricing** — before a case exists
+
+| Tool | Answers |
+| --- | --- |
+| `find_eligible_products` | "What can I sell a 62-year-old in Texas for $2M?" Every issuable product plus the rules that will fire. The inverse of `lookup_product_rules`. |
+| `estimate_premium` | "What will it cost?" Annual and monthly premium from the rate table, by age band and risk class. |
+| `lookup_product_rules` | "What are the limits on UL-200?" Issue limits and underwriting rules; evaluates hard eligibility when given an applicant. |
+
+**Knowledge**
+
+| Tool | Answers |
+| --- | --- |
+| `search_policy_documents` | "What does the contract actually say?" Hybrid search over contracts, riders, guidelines and procedures, returning excerpts with `doc_id` so answers can cite a source. |
+
+Every read tool is marked `readOnlyHint: true`. `add_case_note` is marked `readOnlyHint: false,
+destructiveHint: false, idempotentHint: false` — it appends and never edits or deletes, so a mistaken
+call is additive rather than damaging, but calling it twice does write two notes. Clients use these
+hints to decide what needs human confirmation.
 
 Try, once connected: *"Rowan Kessler's application is stuck — what's it waiting on, and what does the
 guideline actually say about that requirement?"* No single tool answers that. The agent chains all
@@ -103,6 +141,57 @@ Or add to `.mcp.json`:
 }
 ```
 
+## What happens when a client calls a tool
+
+Worth being precise about, because the common mental picture — "the model calls my API" — is wrong
+in two ways. **The model never talks to this server.** The client does. And there is no HTTP
+involved: this server speaks JSON-RPC 2.0 over its own stdin and stdout.
+
+**Startup, once per session.** The client (Claude Code, a Foundry agent) *spawns this process* —
+`node src/index.js` — and holds its stdin/stdout pipes. It sends `initialize`, the server replies
+with protocol version and capabilities, the client sends the `initialized` notification. Then the
+client calls `tools/list`, and the SDK answers with all nine tools: name, description, annotations,
+and a **JSON Schema** for the arguments, which it generated from the zod schemas in `src/index.js`.
+
+**The client puts those tool definitions into the model's context.** This is the step people skip.
+The description strings above are not documentation — they are the prompt. A tool the model
+misunderstands is a tool it calls wrongly, which is why each description says *when to reach for
+this one* rather than just what it returns.
+
+**Per call.** The model emits a tool-use request naming a tool and its arguments. The client — not
+the model — sends:
+
+```jsonc
+// stdin →
+{"jsonrpc":"2.0","id":7,"method":"tools/call",
+ "params":{"name":"get_application_status","arguments":{"application_number":"APP-100242"}}}
+```
+
+The SDK validates `arguments` against that tool's schema and **rejects the call before the handler
+runs** if it doesn't fit — the model gets a schema error back and can retry. On success it invokes
+the handler, which runs parameterised SQL against Postgres and returns content blocks:
+
+```jsonc
+// ← stdout
+{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{ \"application_number\": ... }"}]}}
+```
+
+The client feeds that result back into the model's context as the tool result, and the model decides
+what to do next — often calling another tool, which is exactly the chain the demo above walks.
+
+**Two distinct failure modes**, worth keeping straight:
+
+- A **protocol error** (unknown tool, malformed arguments) returns a JSON-RPC `error`. The model sees
+  it went wrong mechanically.
+- A **tool-level failure** — "no application found with number APP-999999" — is a *successful*
+  JSON-RPC response whose content says so. That's deliberate: it's information the model should
+  reason about, not a crash. `add_case_note` does this rather than throwing, and writes nothing.
+
+**Concurrency and lifetime.** Requests carry an `id`, so the client may have several in flight at
+once; responses are matched by id, not by order. The process lives as long as the client session and
+holds a `pg` connection pool across calls — so state like the pool is per-session, and anything you
+want durable belongs in Postgres.
+
 ## How it fits together
 
 ```
@@ -118,9 +207,9 @@ MCP client (Claude Code / Foundry agent)
         Postgres 16 + pgvector      docker-compose, port 55432
 ```
 
-Layout: `src/index.js` (server and tools) · `src/embed.js` (embedding) · `src/db.js` (pool) ·
-`db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
-`scripts/smoke.mjs` (MCP client test).
+Layout: `src/index.js` (server and all nine tools) · `src/embed.js` (embedding) · `src/db.js`
+(pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
+`scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow).
 
 ## Swapping in a real embedding model
 

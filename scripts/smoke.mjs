@@ -69,6 +69,65 @@ show(
   }),
 );
 
+show(
+  'find_applications  ->  everything untouched for 20+ days',
+  await client.callTool({ name: 'find_applications', arguments: { stalled_days_min: 20 } }),
+);
+
+show(
+  'get_outstanding_requirements  ->  overdue across the whole pipeline',
+  await client.callTool({ name: 'get_outstanding_requirements', arguments: { overdue_only: true } }),
+);
+
+show(
+  'find_eligible_products  ->  age 62, $2M, TX',
+  await client.callTool({
+    name: 'find_eligible_products',
+    arguments: { applicant_age: 62, face_amount: 2000000, state: 'TX' },
+  }),
+);
+
+show(
+  'estimate_premium  ->  TRM-20, age 34, $250k, preferred',
+  await client.callTool({
+    name: 'estimate_premium',
+    arguments: { product_code: 'TRM-20', applicant_age: 34, face_amount: 250000, risk_class: 'preferred' },
+  }),
+);
+
+show(
+  'estimate_premium  ->  age 90 (no rate band; should list what exists)',
+  await client.callTool({
+    name: 'estimate_premium',
+    arguments: { product_code: 'TRM-20', applicant_age: 90, face_amount: 250000 },
+  }),
+);
+
+show(
+  'get_underwriter_workload  ->  triage view',
+  await client.callTool({ name: 'get_underwriter_workload', arguments: {} }),
+);
+
+show(
+  'add_case_note  ->  the one writing tool',
+  await client.callTool({
+    name: 'add_case_note',
+    arguments: {
+      application_number: 'APP-100243',
+      note: 'Called provider; APS promised by Friday.',
+      author: 'M. Alvarez',
+    },
+  }),
+);
+
+show(
+  'add_case_note  ->  unknown application (must write nothing)',
+  await client.callTool({
+    name: 'add_case_note',
+    arguments: { application_number: 'APP-999999', note: 'should not persist', author: 'test' },
+  }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);
