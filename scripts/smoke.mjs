@@ -128,6 +128,60 @@ show(
   }),
 );
 
+show(
+  'find_applicant  ->  "osei" (name, not application number)',
+  await client.callTool({ name: 'find_applicant', arguments: { name: 'osei' } }),
+);
+
+show(
+  'list_documents  ->  everything filed under TRM-20',
+  await client.callTool({ name: 'list_documents', arguments: { product_code: 'TRM-20' } }),
+);
+
+show(
+  'get_rate_card  ->  TRM-20, preferred class',
+  await client.callTool({ name: 'get_rate_card', arguments: { product_code: 'TRM-20', risk_class: 'preferred' } }),
+);
+
+show(
+  'get_pipeline_metrics  ->  book health',
+  await client.callTool({ name: 'get_pipeline_metrics', arguments: {} }),
+);
+
+// The two tools below mutate, so this run's output differs from the next one's unless the
+// database is rebuilt. That is the point of the second call in each pair.
+show(
+  'update_requirement_status  ->  APS received',
+  await client.callTool({
+    name: 'update_requirement_status',
+    arguments: { application_number: 'APP-100243', requirement_code: 'APS', status: 'received', note: 'Received by fax' },
+  }),
+);
+
+show(
+  'update_requirement_status  ->  same call again (idempotent, must be a no-op)',
+  await client.callTool({
+    name: 'update_requirement_status',
+    arguments: { application_number: 'APP-100243', requirement_code: 'APS', status: 'received' },
+  }),
+);
+
+show(
+  'reassign_application  ->  APP-100245 to S. Bhatt',
+  await client.callTool({
+    name: 'reassign_application',
+    arguments: { application_number: 'APP-100245', to_underwriter: 'S. Bhatt', reason: 'D. Lindqvist at capacity' },
+  }),
+);
+
+show(
+  'reassign_application  ->  unknown application (must change nothing)',
+  await client.callTool({
+    name: 'reassign_application',
+    arguments: { application_number: 'APP-999999', to_underwriter: 'S. Bhatt', reason: 'should not apply' },
+  }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);

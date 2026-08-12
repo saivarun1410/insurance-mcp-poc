@@ -6,7 +6,7 @@ LLM agent can call.
 
 The point of the POC: an agent shouldn't need a bespoke integration per assistant. Implement the
 domain once as an MCP server, and any MCP-capable client (Claude Code, Microsoft Foundry agents,
-an internal chat surface) gets the same nine tools with the same contracts.
+an internal chat surface) gets the same fifteen tools with the same contracts.
 
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
@@ -26,19 +26,15 @@ npm run setup     # starts Postgres+pgvector, seeds the corpus, runs the smoke t
 ```
 
 `npm run setup` is the whole demo: it stands up the database, embeds and inserts 12 documents, then
-connects to the MCP server as a real MCP client and exercises all nine tools. Expected tail:
+connects to the MCP server as a real MCP client and exercises all fifteen tools. Expected tail:
 
 ```
-Connected. Server exposes 9 tools:
+Connected. Server exposes 15 tools:
   - search_policy_documents: Search policy documents
   - get_application_status: Get application status
-  - lookup_product_rules: Look up product rules
-  - find_applications: Find applications
-  - get_outstanding_requirements: Get outstanding requirements
-  - find_eligible_products: Find eligible products
-  - estimate_premium: Estimate premium
-  - get_underwriter_workload: Get underwriter workload
-  - add_case_note: Add case note
+  ...
+  - update_requirement_status: Update requirement status
+  - reassign_application: Reassign application
 ...
 All tool calls completed.
 ```
@@ -48,7 +44,7 @@ with `npm run db:down`.
 
 ## The tools
 
-Nine tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
+Fifteen tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
 `get_product` or `list_events` here — an agent that has to assemble answers from CRUD primitives
 burns turns and invents joins. Each tool below answers a question a person actually asks.
 
@@ -58,7 +54,9 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | --- | --- |
 | `get_application_status` | "Where is APP-100242 and what is it waiting on?" Status, blocking step, underwriter, full event timeline. |
 | `get_outstanding_requirements` | "Why isn't it moving, and what do I chase today?" Open requirements with age in days, plus the follow-up action the procedure calls for at 14 / 28 / 90 days. |
-| `add_case_note` | "Record that I called the provider." The only writing tool. |
+| `find_applicant` | "What's happening with Priya's application?" Name, whole or partial, to application numbers. Everything else here needs the number — this is how you get it. |
+| `add_case_note` | "Record that I called the provider." Appends to the timeline. |
+| `update_requirement_status` | "The APS came in." Marks a requirement received or waived and logs it. |
 
 **Pipeline** — across the whole book
 
@@ -66,6 +64,8 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | --- | --- |
 | `find_applications` | "What's stuck?" Filter by status, product, underwriter, state, or days untouched. |
 | `get_underwriter_workload` | "Who is overloaded?" Open cases, face amount at risk, oldest untouched case per underwriter. |
+| `get_pipeline_metrics` | "How are we doing?" Cases and face amount by status, plus outstanding requirements bucketed against the 14 / 28 / 90-day thresholds. |
+| `reassign_application` | "Move this off D. Lindqvist." Reassigns and records why. |
 
 **Sales and pricing** — before a case exists
 
@@ -73,6 +73,7 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | --- | --- |
 | `find_eligible_products` | "What can I sell a 62-year-old in Texas for $2M?" Every issuable product plus the rules that will fire. The inverse of `lookup_product_rules`. |
 | `estimate_premium` | "What will it cost?" Annual and monthly premium from the rate table, by age band and risk class. |
+| `get_rate_card` | "How was that derived?" Every risk class and age band for a product. |
 | `lookup_product_rules` | "What are the limits on UL-200?" Issue limits and underwriting rules; evaluates hard eligibility when given an applicant. |
 
 **Knowledge**
@@ -80,11 +81,19 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | Tool | Answers |
 | --- | --- |
 | `search_policy_documents` | "What does the contract actually say?" Hybrid search over contracts, riders, guidelines and procedures, returning excerpts with `doc_id` so answers can cite a source. |
+| `list_documents` | "What guidance exists for this product?" Enumerates the corpus without searching — also the fallback when a search returns nothing. |
 
-Every read tool is marked `readOnlyHint: true`. `add_case_note` is marked `readOnlyHint: false,
-destructiveHint: false, idempotentHint: false` — it appends and never edits or deletes, so a mistaken
-call is additive rather than damaging, but calling it twice does write two notes. Clients use these
-hints to decide what needs human confirmation.
+Twelve of the fifteen are read-only and marked `readOnlyHint: true`. The three writers differ in a
+way the annotations capture, because clients use them to decide what needs human confirmation:
+
+| Tool | Semantics | Annotations |
+| --- | --- | --- |
+| `add_case_note` | Appends. Two calls write two notes. | `idempotentHint: false` |
+| `update_requirement_status` | Edits a row, but re-applying the same value changes nothing. | `idempotentHint: true` |
+| `reassign_application` | Overwrites the assignment; same target twice is a no-op. | `idempotentHint: true` |
+
+None are marked destructive: nothing here deletes, and every writer checks its target exists first
+and returns a plain "nothing was changed" result rather than throwing.
 
 Try, once connected: *"Rowan Kessler's application is stuck — what's it waiting on, and what does the
 guideline actually say about that requirement?"* No single tool answers that. The agent chains all
@@ -150,7 +159,7 @@ involved: this server speaks JSON-RPC 2.0 over its own stdin and stdout.
 **Startup, once per session.** The client (Claude Code, a Foundry agent) *spawns this process* —
 `node src/index.js` — and holds its stdin/stdout pipes. It sends `initialize`, the server replies
 with protocol version and capabilities, the client sends the `initialized` notification. Then the
-client calls `tools/list`, and the SDK answers with all nine tools: name, description, annotations,
+client calls `tools/list`, and the SDK answers with all fifteen tools: name, description, annotations,
 and a **JSON Schema** for the arguments, which it generated from the zod schemas in `src/index.js`.
 
 **The client puts those tool definitions into the model's context.** This is the step people skip.
@@ -207,7 +216,7 @@ MCP client (Claude Code / Foundry agent)
         Postgres 16 + pgvector      docker-compose, port 55432
 ```
 
-Layout: `src/index.js` (server and all nine tools) · `src/embed.js` (embedding) · `src/db.js`
+Layout: `src/index.js` (server and all fifteen tools) · `src/embed.js` (embedding) · `src/db.js`
 (pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
 `scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow).
 

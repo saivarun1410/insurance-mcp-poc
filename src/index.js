@@ -449,4 +449,233 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'find_applicant',
+  {
+    title: 'Find applicant',
+    description:
+      'Find applications by applicant name, whole or partial. Use this first when someone is named ' +
+      'but no application number is given — every other case tool needs the number, and this is how ' +
+      'you get it.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      name: z.string().min(2).describe('Full or partial name, case-insensitive'),
+      limit: z.number().int().min(1).max(25).optional(),
+    },
+  },
+  async ({ name, limit = 10 }) => {
+    const rows = await query(
+      `SELECT application_number, applicant_name, applicant_age, applicant_state,
+              product_code, face_amount, status, current_step, assigned_underwriter
+         FROM applications
+        WHERE applicant_name ILIKE '%' || $1 || '%'
+        ORDER BY applicant_name
+        LIMIT $2`,
+      [name, limit],
+    );
+
+    if (rows.length === 0) return text(`No applicant matching "${name}".`);
+    return text({ count: rows.length, matches: rows });
+  },
+);
+
+server.registerTool(
+  'list_documents',
+  {
+    title: 'List documents',
+    description:
+      'Enumerate the document corpus by product or type, without searching. Use when the question is ' +
+      '"what guidance exists for this product" rather than "what does it say" — or when a search ' +
+      'came back empty and you need to see what is actually available.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      product_code: z.string().optional(),
+      doc_type: z
+        .enum(['contract', 'rider', 'underwriting_guideline', 'disclosure', 'procedure'])
+        .optional(),
+    },
+  },
+  async ({ product_code, doc_type }) => {
+    const rows = await query(
+      `SELECT doc_id, title, doc_type, product_code, length(content) AS length_chars
+         FROM policy_documents
+        WHERE ($1::text IS NULL OR product_code = $1)
+          AND ($2::text IS NULL OR doc_type = $2)
+        ORDER BY doc_type, doc_id`,
+      [product_code ?? null, doc_type ?? null],
+    );
+
+    return text({ count: rows.length, documents: rows });
+  },
+);
+
+server.registerTool(
+  'get_rate_card',
+  {
+    title: 'Get rate card',
+    description:
+      'The full rate table for a product — every risk class and age band. Use when comparing classes ' +
+      'or explaining how a premium was derived; use estimate_premium when you want one number.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      product_code: z.string(),
+      risk_class: z.enum(['preferred_plus', 'preferred', 'standard', 'table_b', 'table_d']).optional(),
+    },
+  },
+  async ({ product_code, risk_class }) => {
+    const rows = await query(
+      `SELECT risk_class, age_min, age_max, annual_rate_per_1000
+         FROM rate_tables
+        WHERE product_code = $1
+          AND ($2::text IS NULL OR risk_class = $2)
+        ORDER BY age_min, risk_class`,
+      [product_code, risk_class ?? null],
+    );
+
+    if (rows.length === 0) return text(`No rate card for ${product_code}.`);
+    return text({ product_code, bands: rows, units: 'annual premium per $1,000 of face amount' });
+  },
+);
+
+server.registerTool(
+  'get_pipeline_metrics',
+  {
+    title: 'Get pipeline metrics',
+    description:
+      'Health of the book: case counts and face amount by status, and outstanding requirements ' +
+      'bucketed by age against the 14 / 28 / 90 day follow-up thresholds. Use for "how are we doing" ' +
+      'questions rather than anything about a specific case.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {},
+  },
+  async () => {
+    const byStatus = await query(
+      `SELECT status, COUNT(*)::int AS cases, SUM(face_amount)::bigint AS face_amount,
+              ROUND(AVG(EXTRACT(DAY FROM now() - submitted_at)))::int AS avg_days_since_submission
+         FROM applications
+        GROUP BY status
+        ORDER BY cases DESC`,
+    );
+
+    const requirementAging = await query(
+      `SELECT CASE
+                WHEN now() - ordered_at >= interval '90 days' THEN 'past_90_days'
+                WHEN now() - ordered_at >= interval '28 days' THEN 'second_follow_up'
+                WHEN now() - ordered_at >= interval '14 days' THEN 'first_follow_up'
+                ELSE 'within_first_cycle'
+              END AS bucket,
+              COUNT(*)::int AS requirements
+         FROM requirements
+        WHERE status = 'outstanding'
+        GROUP BY bucket`,
+    );
+
+    const [totals] = await query(
+      `SELECT COUNT(*)::int AS total_applications,
+              COUNT(*) FILTER (WHERE status NOT IN ('approved', 'declined'))::int AS open_applications,
+              SUM(face_amount) FILTER (WHERE status NOT IN ('approved', 'declined'))::bigint AS open_face_amount
+         FROM applications`,
+    );
+
+    return text({ totals, by_status: byStatus, outstanding_requirement_aging: requirementAging });
+  },
+);
+
+server.registerTool(
+  'update_requirement_status',
+  {
+    title: 'Update requirement status',
+    description:
+      'Mark an outstanding requirement as received or waived. Records the change on the application ' +
+      'timeline as well. Setting a requirement to the state it is already in is a no-op.',
+    // Edits an existing row rather than appending, but re-applying the same value changes nothing,
+    // so this is idempotent — unlike add_case_note.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      requirement_code: z.string().describe('e.g. APS, PARAMED, MVR'),
+      status: z.enum(['received', 'waived']),
+      note: z.string().max(500).optional().describe('Optional context for the timeline entry'),
+    },
+  },
+  async ({ application_number, requirement_code, status, note }) => {
+    const [existing] = await query(
+      'SELECT id, status FROM requirements WHERE application_number = $1 AND requirement_code = $2',
+      [application_number, requirement_code],
+    );
+
+    if (!existing) {
+      return text(
+        `No requirement ${requirement_code} on ${application_number}. Nothing was changed.`,
+      );
+    }
+    if (existing.status === status) {
+      return text({ changed: false, reason: `Already ${status}.`, requirement_code, application_number });
+    }
+
+    const [updated] = await query(
+      `UPDATE requirements
+          SET status = $1, received_at = CASE WHEN $1 = 'received' THEN now() ELSE received_at END
+        WHERE id = $2
+        RETURNING application_number, requirement_code, status, received_at`,
+      [status, existing.id],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'requirement_updated', $2)`,
+      [application_number, `${requirement_code} marked ${status}${note ? ` — ${note}` : ''}`],
+    );
+
+    return text({ changed: true, previous_status: existing.status, requirement: updated });
+  },
+);
+
+server.registerTool(
+  'reassign_application',
+  {
+    title: 'Reassign application',
+    description:
+      'Move a case to a different underwriter and record why. Use for triage after checking ' +
+      'get_underwriter_workload. Overwrites the current assignment, so confirm the intent before ' +
+      'calling.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      to_underwriter: z.string().describe('Name of the receiving underwriter'),
+      reason: z.string().min(1).max(500),
+    },
+  },
+  async ({ application_number, to_underwriter, reason }) => {
+    const [application] = await query(
+      'SELECT assigned_underwriter FROM applications WHERE application_number = $1',
+      [application_number],
+    );
+    if (!application) return text(`No application found with number ${application_number}. Nothing was changed.`);
+
+    if (application.assigned_underwriter === to_underwriter) {
+      return text({ changed: false, reason: `Already assigned to ${to_underwriter}.`, application_number });
+    }
+
+    await query(
+      'UPDATE applications SET assigned_underwriter = $1, updated_at = now() WHERE application_number = $2',
+      [to_underwriter, application_number],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'reassigned', $2)`,
+      [application_number, `Reassigned from ${application.assigned_underwriter ?? 'unassigned'} to ${to_underwriter} — ${reason}`],
+    );
+
+    return text({
+      changed: true,
+      application_number,
+      previous_underwriter: application.assigned_underwriter,
+      new_underwriter: to_underwriter,
+      reason,
+    });
+  },
+);
+
 await server.connect(new StdioServerTransport());
