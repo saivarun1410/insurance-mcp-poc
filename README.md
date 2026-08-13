@@ -6,7 +6,7 @@ LLM agent can call.
 
 The point of the POC: an agent shouldn't need a bespoke integration per assistant. Implement the
 domain once as an MCP server, and any MCP-capable client (Claude Code, Microsoft Foundry agents,
-an internal chat surface) gets the same fifteen tools with the same contracts.
+an internal chat surface) gets the same sixteen tools with the same contracts.
 
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
@@ -25,11 +25,11 @@ npm install
 npm run setup     # starts Postgres+pgvector, seeds the corpus, runs the smoke test
 ```
 
-`npm run setup` is the whole demo: it stands up the database, embeds and inserts 12 documents, then
-connects to the MCP server as a real MCP client and exercises all fifteen tools. Expected tail:
+`npm run setup` is the whole demo: it stands up the database, embeds and inserts 13 documents, then
+connects to the MCP server as a real MCP client and exercises all sixteen tools. Expected tail:
 
 ```
-Connected. Server exposes 15 tools:
+Connected. Server exposes 16 tools:
   - search_policy_documents: Search policy documents
   - get_application_status: Get application status
   ...
@@ -44,7 +44,7 @@ with `npm run db:down`.
 
 ## The tools
 
-Fifteen tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
+Sixteen tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
 `get_product` or `list_events` here — an agent that has to assemble answers from CRUD primitives
 burns turns and invents joins. Each tool below answers a question a person actually asks.
 
@@ -82,8 +82,9 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | --- | --- |
 | `search_policy_documents` | "What does the contract actually say?" Hybrid search over contracts, riders, guidelines and procedures, returning excerpts with `doc_id` so answers can cite a source. |
 | `list_documents` | "What guidance exists for this product?" Enumerates the corpus without searching — also the fallback when a search returns nothing. |
+| `get_document` | "Quote me the exact clause." One document in full, since search truncates excerpts at 600 characters. Also returns the product's underwriting rules, which is usually what a reader needs next. |
 
-Twelve of the fifteen are read-only and marked `readOnlyHint: true`. The three writers differ in a
+Thirteen of the sixteen are read-only and marked `readOnlyHint: true`. The three writers differ in a
 way the annotations capture, because clients use them to decide what needs human confirmation:
 
 | Tool | Semantics | Annotations |
@@ -159,7 +160,7 @@ involved: this server speaks JSON-RPC 2.0 over its own stdin and stdout.
 **Startup, once per session.** The client (Claude Code, a Foundry agent) *spawns this process* —
 `node src/index.js` — and holds its stdin/stdout pipes. It sends `initialize`, the server replies
 with protocol version and capabilities, the client sends the `initialized` notification. Then the
-client calls `tools/list`, and the SDK answers with all fifteen tools: name, description, annotations,
+client calls `tools/list`, and the SDK answers with all sixteen tools: name, description, annotations,
 and a **JSON Schema** for the arguments, which it generated from the zod schemas in `src/index.js`.
 
 **The client puts those tool definitions into the model's context.** This is the step people skip.
@@ -216,7 +217,7 @@ MCP client (Claude Code / Foundry agent)
         Postgres 16 + pgvector      docker-compose, port 55432
 ```
 
-Layout: `src/index.js` (server and all fifteen tools) · `src/embed.js` (embedding) · `src/db.js`
+Layout: `src/index.js` (server and all sixteen tools) · `src/embed.js` (embedding) · `src/db.js`
 (pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
 `scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow).
 

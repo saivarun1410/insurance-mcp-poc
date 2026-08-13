@@ -129,6 +129,11 @@ show(
 );
 
 show(
+  'get_document  ->  UL200-CONTRACT-01 in full (search truncates it at 600 chars)',
+  await client.callTool({ name: 'get_document', arguments: { doc_id: 'UL200-CONTRACT-01' } }),
+);
+
+show(
   'find_applicant  ->  "osei" (name, not application number)',
   await client.callTool({ name: 'find_applicant', arguments: { name: 'osei' } }),
 );

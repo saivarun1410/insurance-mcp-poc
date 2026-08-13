@@ -93,6 +93,20 @@ const DOCUMENTS = [
       'A claim arising within two years of the policy date or of reinstatement is subject to a contestability investigation. The claims examiner orders an attending physician statement and a pharmacy history covering the five years preceding the application. Material misrepresentation discovered during the contestability period permits rescission of the policy and return of premiums paid. After the contestability period expires, the company may not contest the policy except for nonpayment of premium or fraudulent misstatement of age or sex where state law permits.',
   },
   {
+    // Deliberately long. Real contract articles run to pages, and a corpus of short paragraphs
+    // hides the fact that search returns truncated excerpts — this one exercises that path.
+    doc_id: 'UL200-CONTRACT-01',
+    title: 'FlexBuild Universal Life — Policy Contract, Article 4: Premiums, Account Value and Lapse',
+    doc_type: 'contract',
+    product_code: 'UL-200',
+    content:
+      'Premium payments are flexible. The owner may pay any amount at any time, subject to the minimum initial premium shown in the policy schedule and to the maximum premium limits imposed by the definition of life insurance under applicable tax law. The company reserves the right to refuse or return any premium that would cause the policy to fail to qualify as life insurance for tax purposes, or to require evidence of insurability before accepting a premium that increases the net amount at risk. ' +
+      'Each premium received is credited to the account value after deduction of the premium expense charge stated in the policy schedule. On each monthly anniversary the company deducts a monthly deduction from the account value, consisting of the cost of insurance charge for the net amount at risk, the monthly policy fee, any charges for riders attached to this policy, and any applicable substandard or flat extra ratings. The cost of insurance rate is determined by the company based on the insured attained age, sex, and risk classification, and will not exceed the guaranteed maximum rates shown in the policy schedule. ' +
+      'Interest is credited to the account value at a rate declared by the company, which will never be less than the guaranteed minimum annual effective rate of two percent. The company may credit interest in excess of the guaranteed rate, but any such excess is not guaranteed and may be changed prospectively at the discretion of the company. Different interest rates may be credited to that portion of the account value equal to any outstanding policy loan. ' +
+      'This policy enters the grace period if, on any monthly anniversary, the cash surrender value is insufficient to cover the monthly deduction then due. The company will mail written notice of the amount required to prevent termination to the owner and to any assignee of record at the last known address. The grace period is sixty-one days from the date that notice is mailed. If the required amount is not paid before the grace period ends, this policy terminates without value and all coverage, including coverage under any attached rider, ceases as of the date the grace period began. ' +
+      'If death occurs during the grace period, the death benefit is reduced by the amount of any overdue monthly deductions. A policy that has terminated under this article may be reinstated within three years of termination upon written application, evidence of insurability satisfactory to the company, and payment of an amount sufficient to keep the policy in force for at least three months following reinstatement.',
+  },
+  {
     doc_id: 'PROC-REQ-01',
     title: 'New Business Procedure — Outstanding Requirements Follow-Up',
     doc_type: 'procedure',

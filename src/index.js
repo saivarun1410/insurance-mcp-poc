@@ -678,4 +678,46 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'get_document',
+  {
+    title: 'Get document',
+    description:
+      'Retrieve one document in full by its doc_id. search_policy_documents truncates excerpts, so ' +
+      'use this when the exact wording matters — quoting a clause, checking a condition, or reading ' +
+      'past where an excerpt cut off. Get the doc_id from search_policy_documents or list_documents.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      doc_id: z.string().describe('e.g. TRM20-CONTRACT-02'),
+    },
+  },
+  async ({ doc_id }) => {
+    const [document] = await query(
+      `SELECT d.doc_id, d.title, d.doc_type, d.product_code, d.content,
+              p.name AS product_name
+         FROM policy_documents d
+         LEFT JOIN products p USING (product_code)
+        WHERE d.doc_id = $1`,
+      [doc_id],
+    );
+
+    if (!document) {
+      const nearby = await query(
+        'SELECT doc_id, title FROM policy_documents ORDER BY doc_id LIMIT 20',
+      );
+      return text({ error: `No document with doc_id ${doc_id}.`, available: nearby });
+    }
+
+    // Rules for the same product are what a reader of a guideline usually needs next.
+    const relatedRules = document.product_code
+      ? await query(
+          'SELECT rule_code, description, outcome FROM underwriting_rules WHERE product_code = $1 ORDER BY rule_code',
+          [document.product_code],
+        )
+      : [];
+
+    return text({ ...document, related_rules: relatedRules });
+  },
+);
+
 await server.connect(new StdioServerTransport());
