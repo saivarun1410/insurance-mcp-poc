@@ -81,7 +81,7 @@ CREATE TABLE policy_documents (
     doc_type     TEXT NOT NULL,
     product_code TEXT REFERENCES products(product_code),
     content      TEXT NOT NULL,
-    embedding    vector(256),
+    embedding    vector(384),
     -- Lexical half of hybrid retrieval. Maintained by Postgres, so it can never drift
     -- out of sync with content the way a separately-populated column would.
     content_tsv  tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || content)) STORED

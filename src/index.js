@@ -6,6 +6,11 @@ import { z } from 'zod';
 import { query } from './db.js';
 import { embed, toVectorLiteral } from './embed.js';
 
+// This process speaks JSON-RPC on stdout, so ANY stray write there corrupts the stream and
+// the client silently loses the connection. Model loaders and native runtimes are a common
+// source of incidental logging, so route console.log to stderr before anything else runs.
+console.log = (...args) => console.error(...args);
+
 const server = new McpServer({ name: 'insurance-mcp-poc', version: '0.1.0' });
 
 const text = (value) => ({
@@ -27,7 +32,7 @@ server.registerTool(
     },
   },
   async ({ query: searchText, product_code, limit = 3 }) => {
-    const embedding = toVectorLiteral(embed(searchText));
+    const embedding = toVectorLiteral(await embed(searchText));
     // Hybrid retrieval via Reciprocal Rank Fusion. Vector similarity catches paraphrase,
     // full-text catches exact domain terms ("paramedical", "contestability"); either alone
     // misranks on this corpus. RRF combines the two *rankings* rather than their scores,
@@ -62,7 +67,15 @@ server.registerTool(
          FROM filtered f
          LEFT JOIN vector_ranked v ON v.doc_id = f.doc_id
          LEFT JOIN text_ranked   t ON t.doc_id = f.doc_id
-        ORDER BY score DESC
+        ORDER BY score DESC,
+                 -- RRF ties are common and exact: a document ranked (1,2) scores identically to
+                 -- one ranked (2,1). Without a tie-break Postgres returns whichever the plan
+                 -- happens to emit first, so the same query can give different answers in
+                 -- different contexts. Prefer the better vector rank — with a real embedding
+                 -- model that is the semantic signal, and full-text is the safety net — then
+                 -- doc_id, so the order is fully determined.
+                 COALESCE(v.rank, 2147483647),
+                 f.doc_id
         LIMIT $4`,
       [embedding, searchText, product_code ?? null, limit],
     );

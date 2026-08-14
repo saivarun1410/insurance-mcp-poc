@@ -120,7 +120,7 @@ async function main() {
   await query('DELETE FROM policy_documents');
 
   for (const doc of DOCUMENTS) {
-    const embedding = toVectorLiteral(embed(`${doc.title}\n${doc.content}`));
+    const embedding = toVectorLiteral(await embed(`${doc.title}\n${doc.content}`));
     await query(
       `INSERT INTO policy_documents (doc_id, title, doc_type, product_code, content, embedding)
        VALUES ($1, $2, $3, $4, $5, $6::vector)`,

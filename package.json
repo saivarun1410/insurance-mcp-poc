@@ -10,11 +10,13 @@
     "seed": "node scripts/seed.mjs",
     "start": "node src/index.js",
     "smoke": "node scripts/smoke.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
     "demo": "node scripts/demo.mjs",
     "setup": "npm run db:up && npm run seed && npm run smoke"
   },
   "license": "MIT",
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "pg": "^8.13.0",
     "zod": "^3.23.0"

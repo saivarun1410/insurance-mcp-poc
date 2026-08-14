@@ -219,28 +219,39 @@ MCP client (Claude Code / Foundry agent)
 
 Layout: `src/index.js` (server and all sixteen tools) · `src/embed.js` (embedding) · `src/db.js`
 (pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
-`scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow).
+`scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow) ·
+`scripts/benchmark.mjs` (retrieval quality).
 
-## Swapping in a real embedding model
+## The embedding, and why it was measured
 
-`src/embed.js` ships a deterministic hashed bag-of-words projection so the repo runs offline with no
-API key. It matches on vocabulary overlap, not meaning — good enough to demonstrate the retrieval
-path, not good enough for production.
+`src/embed.js` runs **all-MiniLM-L6-v2 locally, in-process**, via transformers.js (ONNX). No API
+key, no separate service, no Python. Weights (~23MB quantized) download once on first use and cache
+under `~/.cache/huggingface`; the model loads lazily on the first search, so spawning the server
+stays instant.
 
-Replacing it is a one-function change. Keep `EMBEDDING_DIM` in sync with the `vector(n)` column in
-`db/init.sql`, then re-run `npm run seed`:
+It replaced a hashed bag-of-words stand-in, and `npm run benchmark` records what that was worth —
+ten questions with a known-correct document, plus paraphrases that share no vocabulary with their
+target:
 
-```js
-export async function embed(text) {
-  const response = await fetch(`${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${process.env.EMBEDDING_DEPLOYMENT}/embeddings?api-version=2024-02-01`, {
-    method: 'POST',
-    headers: { 'api-key': process.env.AZURE_OPENAI_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: text }),
-  });
-  const { data } = await response.json();
-  return data[0].embedding;
-}
-```
+| | hashed bag-of-words | all-MiniLM-L6-v2 |
+| --- | --- | --- |
+| vector only | 8/10 | **10/10** |
+| full-text only | 9/10 | 9/10 |
+| hybrid (RRF) | 9/10 | **10/10** |
+| paraphrases | 1/3 | **2/3** |
+
+The number that matters is the last row. The old embedding scored **0.0000** cosine between
+"dies by suicide" and "takes their own life" — identical to its score against an unrelated sentence
+about grace periods, because it matched shared words and those phrases share none. Full-text search
+has the same ceiling for the same reason. Only a trained model can close that gap, and it is the
+sole reason the vector half exists: on the ten literal questions, plain Postgres full-text was
+already beating vector-only 9 to 8.
+
+The one paraphrase still missed lands at **rank 3 of 13**, not wildly off, and adding a few words
+of context ("...within two years of the policy date") puts it first. Short queries are ambiguous.
+
+Changing model means changing `EMBEDDING_DIM` here **and** `vector(384)` in `db/init.sql`, then
+`npm run db:down && npm run db:up && npm run seed`. Old vectors are meaningless under a new model.
 
 ## Notes and limitations
 
@@ -256,10 +267,18 @@ Worth stating plainly, since they're the things a reviewer would ask about:
   an LLM interpreting underwriting conditions free-hand is not something to ship.
 - **No authentication or tenancy.** The server trusts its caller completely. Real deployment needs
   per-caller authorization, since these tools read customer data.
-- **The embedding is lexical, and hybrid search is a mitigation, not a cure.** Fusing full-text
-  ranking with the vector side fixed most of the misranking, but neither half understands meaning:
-  a query that shares no vocabulary with the target document will still miss it. A real embedding
-  model is the actual fix; the fusion then makes it better still.
+- **The model has no idea what insurance is.** It learned which phrases keep company with which,
+  which is enough for paraphrase but leaves a known blind spot: antonyms and negation sit close
+  together, because "the premium increased" and "the premium decreased" appear in near-identical
+  contexts. For a policy corpus that is not academic — retrieving the opposite clause and citing it
+  confidently is worse than returning nothing. It is the strongest argument for keeping the
+  full-text half, which is dumb about meaning but never confuses "not covered" with "covered".
+- **RRF ties are common and were non-deterministic.** A document ranked (1,2) scores identically to
+  one ranked (2,1), and without a tie-break Postgres returned whichever the plan emitted first —
+  the same query gave different answers in different contexts. Now broken by vector rank, then
+  `doc_id`. Worth knowing if you fuse rankings anywhere else.
+- **`node_modules` is 401MB.** Running the model in-process means shipping ONNX runtime binaries.
+  A hosted embedding endpoint would trade that for an API key and a network hop.
 
 ## License
 
