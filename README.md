@@ -6,7 +6,7 @@ LLM agent can call.
 
 The point of the POC: an agent shouldn't need a bespoke integration per assistant. Implement the
 domain once as an MCP server, and any MCP-capable client (Claude Code, Microsoft Foundry agents,
-an internal chat surface) gets the same sixteen tools with the same contracts.
+an internal chat surface) gets the same nineteen tools with the same contracts.
 
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
@@ -26,10 +26,10 @@ npm run setup     # starts Postgres+pgvector, seeds the corpus, runs the smoke t
 ```
 
 `npm run setup` is the whole demo: it stands up the database, embeds and inserts 13 documents, then
-connects to the MCP server as a real MCP client and exercises all sixteen tools. Expected tail:
+connects to the MCP server as a real MCP client and exercises all nineteen tools. Expected tail:
 
 ```
-Connected. Server exposes 16 tools:
+Connected. Server exposes 19 tools:
   - search_policy_documents: Search policy documents
   - get_application_status: Get application status
   ...
@@ -44,7 +44,7 @@ with `npm run db:down`.
 
 ## The tools
 
-Sixteen tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
+Nineteen tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
 `get_product` or `list_events` here — an agent that has to assemble answers from CRUD primitives
 burns turns and invents joins. Each tool below answers a question a person actually asks.
 
@@ -57,6 +57,8 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | `find_applicant` | "What's happening with Priya's application?" Name, whole or partial, to application numbers. Everything else here needs the number — this is how you get it. |
 | `add_case_note` | "Record that I called the provider." Appends to the timeline. |
 | `update_requirement_status` | "The APS came in." Marks a requirement received or waived and logs it. |
+| `order_requirement` | "Order him an EKG." The other half of the requirement lifecycle — `update_requirement_status` can only close ones that exist. |
+| `record_underwriting_decision` | "Approve it at standard." The actual decision: approved, declined, referred, or approved with a rating. |
 
 **Pipeline** — across the whole book
 
@@ -74,6 +76,7 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | `find_eligible_products` | "What can I sell a 62-year-old in Texas for $2M?" Every issuable product plus the rules that will fire. The inverse of `lookup_product_rules`. |
 | `estimate_premium` | "What will it cost?" Annual and monthly premium from the rate table, by age band and risk class. |
 | `get_rate_card` | "How was that derived?" Every risk class and age band for a product. |
+| `compare_products` | "What can I sell her, and what does each cost?" Eligible products priced and sorted cheapest first, in one call instead of four. |
 | `lookup_product_rules` | "What are the limits on UL-200?" Issue limits and underwriting rules; evaluates hard eligibility when given an applicant. |
 
 **Knowledge**
@@ -84,7 +87,7 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | `list_documents` | "What guidance exists for this product?" Enumerates the corpus without searching — also the fallback when a search returns nothing. |
 | `get_document` | "Quote me the exact clause." One document in full, since search truncates excerpts at 600 characters. Also returns the product's underwriting rules, which is usually what a reader needs next. |
 
-Thirteen of the sixteen are read-only and marked `readOnlyHint: true`. The three writers differ in a
+Fourteen of the nineteen are read-only and marked `readOnlyHint: true`. The three writers differ in a
 way the annotations capture, because clients use them to decide what needs human confirmation:
 
 | Tool | Semantics | Annotations |
@@ -92,9 +95,29 @@ way the annotations capture, because clients use them to decide what needs human
 | `add_case_note` | Appends. Two calls write two notes. | `idempotentHint: false` |
 | `update_requirement_status` | Edits a row, but re-applying the same value changes nothing. | `idempotentHint: true` |
 | `reassign_application` | Overwrites the assignment; same target twice is a no-op. | `idempotentHint: true` |
+| `order_requirement` | Inserts, but refuses to duplicate an outstanding requirement. | `idempotentHint: true` |
+| `record_underwriting_decision` | Sets status; recording the same decision twice is a no-op. | `idempotentHint: true` |
 
 None are marked destructive: nothing here deletes, and every writer checks its target exists first
 and returns a plain "nothing was changed" result rather than throwing.
+
+### Guardrails sit at four levels
+
+Worth separating, because only the first is free:
+
+1. **Schema** — zod becomes JSON Schema and the SDK validates *before* the handler runs. A missing
+   required field, a string where a number belongs, an age of 999, an unknown enum value: all
+   rejected with a message naming the offending field, and the database is never touched.
+2. **Existence** — every writer confirms its target exists and returns a plain result saying nothing
+   changed, rather than throwing.
+3. **Domain** — the rules no schema can express, because they depend on other rows.
+   `record_underwriting_decision` refuses to approve a case while requirements are outstanding, and
+   returns the list of what is blocking plus the tool that resolves them.
+4. **Database** — `CHECK` constraints on every status and class column, foreign keys throughout. The
+   last line of defence if the code above is wrong.
+
+Parameterised SQL everywhere, so `'; DROP TABLE applications; --` is searched for as a name and
+matches nobody.
 
 Try, once connected: *"Rowan Kessler's application is stuck — what's it waiting on, and what does the
 guideline actually say about that requirement?"* No single tool answers that. The agent chains all
@@ -160,7 +183,7 @@ involved: this server speaks JSON-RPC 2.0 over its own stdin and stdout.
 **Startup, once per session.** The client (Claude Code, a Foundry agent) *spawns this process* —
 `node src/index.js` — and holds its stdin/stdout pipes. It sends `initialize`, the server replies
 with protocol version and capabilities, the client sends the `initialized` notification. Then the
-client calls `tools/list`, and the SDK answers with all sixteen tools: name, description, annotations,
+client calls `tools/list`, and the SDK answers with all nineteen tools: name, description, annotations,
 and a **JSON Schema** for the arguments, which it generated from the zod schemas in `src/index.js`.
 
 **The client puts those tool definitions into the model's context.** This is the step people skip.
@@ -217,7 +240,7 @@ MCP client (Claude Code / Foundry agent)
         Postgres 16 + pgvector      docker-compose, port 55432
 ```
 
-Layout: `src/index.js` (server and all sixteen tools) · `src/embed.js` (embedding) · `src/db.js`
+Layout: `src/index.js` (server and all nineteen tools) · `src/embed.js` (embedding) · `src/db.js`
 (pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
 `scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow) ·
 `scripts/benchmark.mjs` (retrieval quality).

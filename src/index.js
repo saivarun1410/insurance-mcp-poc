@@ -733,4 +733,226 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'order_requirement',
+  {
+    title: 'Order a requirement',
+    description:
+      'Order a new requirement on an application — an exam, an attending physician statement, a ' +
+      'financial supplement. Completes the other half of update_requirement_status, which can only ' +
+      'close requirements that already exist. Ordering one that is already outstanding is a no-op.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      requirement_code: z.string().min(2).max(20).describe('Short code, e.g. APS, PARAMED, MVR, FINSUPP'),
+      description: z.string().min(3).max(300),
+      vendor: z.string().max(100).optional().describe('Who is fulfilling it, if anyone'),
+    },
+  },
+  async ({ application_number, requirement_code, description, vendor }) => {
+    const [application] = await query(
+      'SELECT application_number FROM applications WHERE application_number = $1',
+      [application_number],
+    );
+    if (!application) return text(`No application found with number ${application_number}. Nothing was ordered.`);
+
+    const [duplicate] = await query(
+      `SELECT id FROM requirements
+        WHERE application_number = $1 AND requirement_code = $2 AND status = 'outstanding'`,
+      [application_number, requirement_code],
+    );
+    if (duplicate) {
+      return text({
+        ordered: false,
+        reason: `${requirement_code} is already outstanding on ${application_number}.`,
+      });
+    }
+
+    const [requirement] = await query(
+      `INSERT INTO requirements (application_number, requirement_code, description, vendor, ordered_at, status)
+       VALUES ($1, $2, $3, $4, now(), 'outstanding')
+       RETURNING id, application_number, requirement_code, description, vendor, ordered_at, status`,
+      [application_number, requirement_code, description, vendor ?? null],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'requirement_ordered', $2)`,
+      [application_number, `${requirement_code} ordered${vendor ? ` from ${vendor}` : ''} — ${description}`],
+    );
+
+    return text({ ordered: true, requirement });
+  },
+);
+
+server.registerTool(
+  'record_underwriting_decision',
+  {
+    title: 'Record an underwriting decision',
+    description:
+      'Record the outcome of underwriting on an application: approved, declined, referred, or ' +
+      'approved with a rating. Updates the case status and writes the reason to the timeline. ' +
+      'Approval is refused while requirements are still outstanding — resolve those first with ' +
+      'update_requirement_status.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      decision: z.enum(['approved', 'declined', 'referred', 'approved_rated']),
+      reason: z.string().min(3).max(500).describe('Why — recorded verbatim on the timeline'),
+      risk_class: z
+        .enum(['preferred_plus', 'preferred', 'standard', 'table_b', 'table_d'])
+        .optional()
+        .describe('Required when the decision is approved_rated'),
+    },
+  },
+  async ({ application_number, decision, reason, risk_class }) => {
+    const [application] = await query(
+      'SELECT status, current_step FROM applications WHERE application_number = $1',
+      [application_number],
+    );
+    if (!application) return text(`No application found with number ${application_number}. Nothing was changed.`);
+
+    if (application.status === decision) {
+      return text({ changed: false, reason: `Already ${decision}.`, application_number });
+    }
+
+    if (decision === 'approved_rated' && !risk_class) {
+      return text({
+        changed: false,
+        reason: 'approved_rated requires a risk_class. Nothing was changed.',
+      });
+    }
+
+    // A domain guardrail, not a schema one: no schema can express "approval is invalid while
+    // evidence is outstanding", because it depends on other rows.
+    if (decision === 'approved' || decision === 'approved_rated') {
+      const outstanding = await query(
+        `SELECT requirement_code, description FROM requirements
+          WHERE application_number = $1 AND status = 'outstanding' ORDER BY ordered_at`,
+        [application_number],
+      );
+      if (outstanding.length > 0) {
+        return text({
+          changed: false,
+          reason: `Cannot approve while ${outstanding.length} requirement(s) remain outstanding.`,
+          outstanding,
+          next_step: 'Resolve each with update_requirement_status, then record the decision again.',
+        });
+      }
+    }
+
+    const STEP = {
+      approved: 'pending_issue',
+      approved_rated: 'pending_offer_acceptance',
+      declined: 'closed',
+      referred: 'senior_review',
+    };
+
+    await query(
+      'UPDATE applications SET status = $1, current_step = $2, updated_at = now() WHERE application_number = $3',
+      [decision, STEP[decision], application_number],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'decision_recorded', $2)`,
+      [application_number, `${decision}${risk_class ? ` at ${risk_class}` : ''} — ${reason}`],
+    );
+
+    return text({
+      changed: true,
+      application_number,
+      previous_status: application.status,
+      decision,
+      risk_class: risk_class ?? null,
+      current_step: STEP[decision],
+    });
+  },
+);
+
+server.registerTool(
+  'compare_products',
+  {
+    title: 'Compare products',
+    description:
+      'For one applicant, return every product they can be issued with its premium, cheapest first, ' +
+      'plus the products they fail and why. Prefer this over calling find_eligible_products and then ' +
+      'estimate_premium once per product — it answers "what are the options and what do they cost" ' +
+      'in a single call.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      applicant_age: z.number().int().min(0).max(120),
+      face_amount: z.number().int().positive(),
+      state: z.string().length(2),
+      risk_class: z
+        .enum(['preferred_plus', 'preferred', 'standard', 'table_b', 'table_d'])
+        .optional()
+        .describe('Assumed class for pricing; defaults to standard'),
+    },
+  },
+  async ({ applicant_age, face_amount, state, risk_class = 'standard' }) => {
+    const POLICY_FEE = 60;
+    const products = await query('SELECT * FROM products WHERE active ORDER BY product_code');
+
+    const options = [];
+    const unavailable = [];
+
+    for (const product of products) {
+      const reasons = [];
+      if (applicant_age < product.min_issue_age || applicant_age > product.max_issue_age) {
+        reasons.push(`issue age outside ${product.min_issue_age}–${product.max_issue_age}`);
+      }
+      if (face_amount < Number(product.min_face_amount) || face_amount > Number(product.max_face_amount)) {
+        reasons.push(`face amount outside ${product.min_face_amount}–${product.max_face_amount}`);
+      }
+      if (!product.available_states.includes(state.toUpperCase())) {
+        reasons.push(`not filed in ${state.toUpperCase()}`);
+      }
+
+      if (reasons.length) {
+        unavailable.push({ product_code: product.product_code, name: product.name, reasons });
+        continue;
+      }
+
+      const [rate] = await query(
+        `SELECT annual_rate_per_1000 FROM rate_tables
+          WHERE product_code = $1 AND risk_class = $2 AND $3 BETWEEN age_min AND age_max`,
+        [product.product_code, risk_class, applicant_age],
+      );
+
+      if (!rate) {
+        // Eligible to be issued, but this class is not priced at this age — a real distinction,
+        // so it is reported rather than silently dropped or shown as free.
+        options.push({
+          product_code: product.product_code,
+          name: product.name,
+          product_type: product.product_type,
+          annual_premium: null,
+          note: `No ${risk_class} rate band at age ${applicant_age}; eligible but unpriced.`,
+        });
+        continue;
+      }
+
+      const annual = (face_amount / 1000) * Number(rate.annual_rate_per_1000) + POLICY_FEE;
+      options.push({
+        product_code: product.product_code,
+        name: product.name,
+        product_type: product.product_type,
+        rate_per_1000: Number(rate.annual_rate_per_1000),
+        annual_premium: Number(annual.toFixed(2)),
+        monthly_premium: Number((annual / 12).toFixed(2)),
+      });
+    }
+
+    options.sort((a, b) => (a.annual_premium ?? Infinity) - (b.annual_premium ?? Infinity));
+
+    return text({
+      applicant: { applicant_age, face_amount, state: state.toUpperCase(), assumed_risk_class: risk_class },
+      options,
+      unavailable,
+      disclaimer: 'Premiums are indicative. The risk class is an assumption until underwriting completes.',
+    });
+  },
+);
+
 await server.connect(new StdioServerTransport());

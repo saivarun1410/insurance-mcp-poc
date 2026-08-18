@@ -187,6 +187,45 @@ show(
   }),
 );
 
+show(
+  'compare_products  ->  age 62, $2M, TX (one call instead of four)',
+  await client.callTool({
+    name: 'compare_products',
+    arguments: { applicant_age: 62, face_amount: 2000000, state: 'TX' },
+  }),
+);
+
+// APP-100244 keeps two outstanding requirements in the seed data, so this refusal is stable
+// across runs — it demonstrates a guardrail no schema could express.
+show(
+  'record_underwriting_decision  ->  approve APP-100244 with requirements outstanding (must refuse)',
+  await client.callTool({
+    name: 'record_underwriting_decision',
+    arguments: { application_number: 'APP-100244', decision: 'approved', reason: 'juvenile case looks fine' },
+  }),
+);
+
+show(
+  'record_underwriting_decision  ->  approved_rated with no risk_class (must refuse)',
+  await client.callTool({
+    name: 'record_underwriting_decision',
+    arguments: { application_number: 'APP-100243', decision: 'approved_rated', reason: 'build rating' },
+  }),
+);
+
+show(
+  'order_requirement  ->  EKG on APP-100245 (second run reports it already outstanding)',
+  await client.callTool({
+    name: 'order_requirement',
+    arguments: {
+      application_number: 'APP-100245',
+      requirement_code: 'EKG',
+      description: 'Resting electrocardiogram',
+      vendor: 'ExamOne',
+    },
+  }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);
