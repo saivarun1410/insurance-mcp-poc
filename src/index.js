@@ -955,4 +955,150 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'create_application',
+  {
+    title: 'Create an application',
+    description:
+      'Submit a new application and return its number. This is the entry point to the pipeline — ' +
+      'every other case tool needs an application that already exists. The product must actually be ' +
+      'issuable to this applicant; hard limits are checked before anything is written.',
+    // Not idempotent, and importantly so: two calls create two applications for the same person.
+    // There is no natural key to deduplicate on, so the caller must mean it.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      applicant_name: z.string().min(2).max(120),
+      applicant_age: z.number().int().min(0).max(120),
+      applicant_state: z.string().length(2).describe('Two-letter state code'),
+      product_code: z.string(),
+      face_amount: z.number().int().positive(),
+      assigned_underwriter: z.string().max(80).optional().describe('Leave empty to submit unassigned'),
+    },
+  },
+  async ({ applicant_name, applicant_age, applicant_state, product_code, face_amount, assigned_underwriter }) => {
+    const [product] = await query('SELECT * FROM products WHERE product_code = $1', [product_code]);
+    if (!product) {
+      const available = await query('SELECT product_code, name FROM products WHERE active ORDER BY product_code');
+      return text({ created: false, error: `Unknown product ${product_code}.`, available });
+    }
+    if (!product.active) {
+      return text({ created: false, error: `${product_code} is no longer open for new business.` });
+    }
+
+    const state = applicant_state.toUpperCase();
+    const failures = [];
+    if (applicant_age < product.min_issue_age || applicant_age > product.max_issue_age) {
+      failures.push(`issue age ${applicant_age} is outside ${product.min_issue_age}-${product.max_issue_age}`);
+    }
+    if (face_amount < Number(product.min_face_amount) || face_amount > Number(product.max_face_amount)) {
+      failures.push(`face amount ${face_amount} is outside ${product.min_face_amount}-${product.max_face_amount}`);
+    }
+    if (!product.available_states.includes(state)) {
+      failures.push(`${product_code} is not filed in ${state}`);
+    }
+    if (failures.length) {
+      return text({
+        created: false,
+        reason: `${product_code} cannot be issued to this applicant. Nothing was written.`,
+        failures,
+        next_step: 'Call compare_products with the same applicant to see what can be issued.',
+      });
+    }
+
+    const [next] = await query(
+      `SELECT 'APP-' || (COALESCE(MAX(substring(application_number from 5)::int), 100240) + 1)::text AS number
+         FROM applications
+        WHERE application_number ~ '^APP-[0-9]+$'`,
+    );
+
+    const [application] = await query(
+      `INSERT INTO applications
+         (application_number, applicant_name, applicant_age, applicant_state, product_code,
+          face_amount, status, current_step, assigned_underwriter, submitted_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending_underwriting', 'awaiting_triage', $7, now(), now())
+       RETURNING application_number, applicant_name, product_code, face_amount, status, current_step,
+                 assigned_underwriter, submitted_at`,
+      [next.number, applicant_name, applicant_age, state, product_code, face_amount, assigned_underwriter ?? null],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'submitted', $2)`,
+      [next.number, `Application created for ${applicant_name}, ${product_code}, face amount ${face_amount}`],
+    );
+
+    // Rules are reported rather than executed, same as everywhere else in this server.
+    const rules = await query(
+      'SELECT rule_code, description, outcome FROM underwriting_rules WHERE product_code = $1 ORDER BY rule_code',
+      [product_code],
+    );
+
+    return text({ created: true, application, rules_to_review: rules });
+  },
+);
+
+server.registerTool(
+  'withdraw_application',
+  {
+    title: 'Withdraw an application',
+    description:
+      'Close a case the applicant or agent has abandoned. This is distinct from ' +
+      'record_underwriting_decision: withdrawal comes from the customer side and is not an ' +
+      'underwriting outcome. A case that has already been decided cannot be withdrawn.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      reason: z.string().min(3).max(500),
+      withdrawn_by: z.string().max(80).optional().describe('Applicant, agent, or whoever requested it'),
+    },
+  },
+  async ({ application_number, reason, withdrawn_by }) => {
+    const [application] = await query(
+      'SELECT status, current_step FROM applications WHERE application_number = $1',
+      [application_number],
+    );
+    if (!application) return text(`No application found with number ${application_number}. Nothing was changed.`);
+
+    if (application.status === 'withdrawn') {
+      return text({ changed: false, reason: 'Already withdrawn.', application_number });
+    }
+
+    const DECIDED = ['approved', 'approved_rated', 'declined'];
+    if (DECIDED.includes(application.status)) {
+      return text({
+        changed: false,
+        reason: `${application_number} is already ${application.status}; a decided case cannot be withdrawn.`,
+        next_step: 'Record the outcome on the timeline with add_case_note instead.',
+      });
+    }
+
+    await query(
+      `UPDATE applications SET status = 'withdrawn', current_step = 'closed', updated_at = now()
+        WHERE application_number = $1`,
+      [application_number],
+    );
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'withdrawn', $2)`,
+      [application_number, `Withdrawn${withdrawn_by ? ` by ${withdrawn_by}` : ''} - ${reason}`],
+    );
+
+    // Outstanding requirements are left as-is rather than cancelled: vendors may already have
+    // been engaged, and the record of what was ordered is worth keeping.
+    const stranded = await query(
+      `SELECT requirement_code FROM requirements WHERE application_number = $1 AND status = 'outstanding'`,
+      [application_number],
+    );
+
+    return text({
+      changed: true,
+      application_number,
+      previous_status: application.status,
+      status: 'withdrawn',
+      requirements_left_outstanding: stranded.map((r) => r.requirement_code),
+    });
+  },
+);
+
 await server.connect(new StdioServerTransport());

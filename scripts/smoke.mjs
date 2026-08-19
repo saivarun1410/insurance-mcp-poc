@@ -226,6 +226,30 @@ show(
   }),
 );
 
+show(
+  'create_application  ->  TRM-30 for a 62-year-old (max issue age 55, must refuse)',
+  await client.callTool({
+    name: 'create_application',
+    arguments: { applicant_name: 'Nadia Fournier', applicant_age: 62, applicant_state: 'TX', product_code: 'TRM-30', face_amount: 500000 },
+  }),
+);
+
+show(
+  'create_application  ->  TRM-20 instead (eligible; each run creates a new number)',
+  await client.callTool({
+    name: 'create_application',
+    arguments: { applicant_name: 'Nadia Fournier', applicant_age: 62, applicant_state: 'TX', product_code: 'TRM-20', face_amount: 500000, assigned_underwriter: 'S. Bhatt' },
+  }),
+);
+
+show(
+  'withdraw_application  ->  APP-100241 is approved (a decided case cannot be withdrawn)',
+  await client.callTool({
+    name: 'withdraw_application',
+    arguments: { application_number: 'APP-100241', reason: 'applicant changed their mind' },
+  }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);
