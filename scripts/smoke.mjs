@@ -250,6 +250,22 @@ show(
   }),
 );
 
+show(
+  'amend_application  ->  raise APP-100243 to $4M on TRM-30 (max $3M, must refuse)',
+  await client.callTool({
+    name: 'amend_application',
+    arguments: { application_number: 'APP-100243', face_amount: 4000000, reason: 'applicant wants more cover' },
+  }),
+);
+
+show(
+  'amend_application  ->  same case, moved to TRM-20 which allows $5M',
+  await client.callTool({
+    name: 'amend_application',
+    arguments: { application_number: 'APP-100243', product_code: 'TRM-20', face_amount: 4000000, reason: 'switched product for the higher limit' },
+  }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);

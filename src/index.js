@@ -1101,4 +1101,129 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'amend_application',
+  {
+    title: 'Amend an application',
+    description:
+      'Change the face amount or product on an in-flight application. Applicants revise how much ' +
+      'cover they want more often than anything else, and the amended figure has to be re-checked ' +
+      'against the product limits — an increase can push a case outside what the product allows, or ' +
+      'across a threshold that changes which rules apply. Decided and withdrawn cases cannot be ' +
+      'amended.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      application_number: z.string(),
+      face_amount: z.number().int().positive().optional(),
+      product_code: z.string().optional().describe('Move the case to a different product'),
+      reason: z.string().min(3).max(500),
+    },
+  },
+  async ({ application_number, face_amount, product_code, reason }) => {
+    if (face_amount === undefined && product_code === undefined) {
+      return text({
+        changed: false,
+        reason: 'Supply face_amount or product_code (or both). Nothing was changed.',
+      });
+    }
+
+    const [application] = await query(
+      `SELECT application_number, applicant_age, applicant_state, product_code, face_amount, status
+         FROM applications WHERE application_number = $1`,
+      [application_number],
+    );
+    if (!application) return text(`No application found with number ${application_number}. Nothing was changed.`);
+
+    const CLOSED = ['approved', 'approved_rated', 'declined', 'withdrawn'];
+    if (CLOSED.includes(application.status)) {
+      return text({
+        changed: false,
+        reason: `${application_number} is ${application.status}; a closed case cannot be amended.`,
+        next_step: 'Create a new application with create_application if the applicant wants different cover.',
+      });
+    }
+
+    const targetProduct = product_code ?? application.product_code;
+    const targetFace = face_amount ?? Number(application.face_amount);
+
+    if (targetProduct === application.product_code && targetFace === Number(application.face_amount)) {
+      return text({
+        changed: false,
+        reason: 'The amendment matches the current values.',
+        application_number,
+      });
+    }
+
+    const [product] = await query('SELECT * FROM products WHERE product_code = $1', [targetProduct]);
+    if (!product) {
+      const available = await query('SELECT product_code, name FROM products WHERE active ORDER BY product_code');
+      return text({ changed: false, error: `Unknown product ${targetProduct}.`, available });
+    }
+    if (!product.active) {
+      return text({ changed: false, error: `${targetProduct} is no longer open for new business.` });
+    }
+
+    // The applicant's age and state are fixed facts on the case; only the requested cover moves.
+    const failures = [];
+    if (application.applicant_age < product.min_issue_age || application.applicant_age > product.max_issue_age) {
+      failures.push(`issue age ${application.applicant_age} is outside ${product.min_issue_age}-${product.max_issue_age} for ${targetProduct}`);
+    }
+    if (targetFace < Number(product.min_face_amount) || targetFace > Number(product.max_face_amount)) {
+      failures.push(`face amount ${targetFace} is outside ${product.min_face_amount}-${product.max_face_amount} for ${targetProduct}`);
+    }
+    if (!product.available_states.includes(application.applicant_state)) {
+      failures.push(`${targetProduct} is not filed in ${application.applicant_state}`);
+    }
+    if (failures.length) {
+      return text({
+        changed: false,
+        reason: 'The amended case would not be issuable. Nothing was changed.',
+        failures,
+        next_step: 'Call compare_products with this applicant to see what the new figure allows.',
+      });
+    }
+
+    await query(
+      `UPDATE applications
+          SET product_code = $1, face_amount = $2, updated_at = now()
+        WHERE application_number = $3`,
+      [targetProduct, targetFace, application_number],
+    );
+
+    const detail =
+      `Amended: ` +
+      [
+        targetProduct !== application.product_code ? `product ${application.product_code} -> ${targetProduct}` : null,
+        targetFace !== Number(application.face_amount) ? `face amount ${application.face_amount} -> ${targetFace}` : null,
+      ]
+        .filter(Boolean)
+        .join(', ') +
+      ` - ${reason}`;
+
+    await query(
+      `INSERT INTO application_events (application_number, occurred_at, event, detail)
+       VALUES ($1, now(), 'amended', $2)`,
+      [application_number, detail],
+    );
+
+    // Reported, not executed — same as everywhere else in this server. An amendment can cross a
+    // threshold (the $1M referral limit, say) so the rule set is worth re-reading, but deciding
+    // which rules now bite is an underwriter's call, not this tool's.
+    const rules = await query(
+      'SELECT rule_code, description, outcome FROM underwriting_rules WHERE product_code = $1 ORDER BY rule_code',
+      [targetProduct],
+    );
+
+    return text({
+      changed: true,
+      application_number,
+      previous: { product_code: application.product_code, face_amount: Number(application.face_amount) },
+      current: { product_code: targetProduct, face_amount: targetFace },
+      status_unchanged: application.status,
+      rules_to_re_review: rules,
+      note: 'Hard limits were re-checked. Underwriting rules are reported for re-review, not evaluated.',
+    });
+  },
+);
+
 await server.connect(new StdioServerTransport());
