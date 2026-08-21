@@ -187,6 +187,95 @@ show(
   }),
 );
 
+show(
+  'compare_products  ->  age 62, $2M, TX (one call instead of four)',
+  await client.callTool({
+    name: 'compare_products',
+    arguments: { applicant_age: 62, face_amount: 2000000, state: 'TX' },
+  }),
+);
+
+// APP-100244 keeps two outstanding requirements in the seed data, so this refusal is stable
+// across runs — it demonstrates a guardrail no schema could express.
+show(
+  'record_underwriting_decision  ->  approve APP-100244 with requirements outstanding (must refuse)',
+  await client.callTool({
+    name: 'record_underwriting_decision',
+    arguments: { application_number: 'APP-100244', decision: 'approved', reason: 'juvenile case looks fine' },
+  }),
+);
+
+show(
+  'record_underwriting_decision  ->  approved_rated with no risk_class (must refuse)',
+  await client.callTool({
+    name: 'record_underwriting_decision',
+    arguments: { application_number: 'APP-100243', decision: 'approved_rated', reason: 'build rating' },
+  }),
+);
+
+show(
+  'order_requirement  ->  EKG on APP-100245 (second run reports it already outstanding)',
+  await client.callTool({
+    name: 'order_requirement',
+    arguments: {
+      application_number: 'APP-100245',
+      requirement_code: 'EKG',
+      description: 'Resting electrocardiogram',
+      vendor: 'ExamOne',
+    },
+  }),
+);
+
+show(
+  'create_application  ->  TRM-30 for a 62-year-old (max issue age 55, must refuse)',
+  await client.callTool({
+    name: 'create_application',
+    arguments: { applicant_name: 'Nadia Fournier', applicant_age: 62, applicant_state: 'TX', product_code: 'TRM-30', face_amount: 500000 },
+  }),
+);
+
+show(
+  'create_application  ->  TRM-20 instead (eligible; each run creates a new number)',
+  await client.callTool({
+    name: 'create_application',
+    arguments: { applicant_name: 'Nadia Fournier', applicant_age: 62, applicant_state: 'TX', product_code: 'TRM-20', face_amount: 500000, assigned_underwriter: 'S. Bhatt' },
+  }),
+);
+
+show(
+  'withdraw_application  ->  APP-100241 is approved (a decided case cannot be withdrawn)',
+  await client.callTool({
+    name: 'withdraw_application',
+    arguments: { application_number: 'APP-100241', reason: 'applicant changed their mind' },
+  }),
+);
+
+show(
+  'amend_application  ->  raise APP-100243 to $4M on TRM-30 (max $3M, must refuse)',
+  await client.callTool({
+    name: 'amend_application',
+    arguments: { application_number: 'APP-100243', face_amount: 4000000, reason: 'applicant wants more cover' },
+  }),
+);
+
+show(
+  'amend_application  ->  same case, moved to TRM-20 which allows $5M',
+  await client.callTool({
+    name: 'amend_application',
+    arguments: { application_number: 'APP-100243', product_code: 'TRM-20', face_amount: 4000000, reason: 'switched product for the higher limit' },
+  }),
+);
+
+show(
+  'find_similar_documents  ->  what sits near the suicide exclusion',
+  await client.callTool({ name: 'find_similar_documents', arguments: { doc_id: 'TRM20-CONTRACT-02' } }),
+);
+
+show(
+  'get_requirement_catalog  ->  turnaround by requirement and by vendor',
+  await client.callTool({ name: 'get_requirement_catalog', arguments: {} }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);
