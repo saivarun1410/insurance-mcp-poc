@@ -1226,4 +1226,99 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'find_similar_documents',
+  {
+    title: 'Find similar documents',
+    description:
+      'Given one document, find the others closest to it in meaning. Use this after landing on a ' +
+      'clause to find related provisions elsewhere in the corpus — the rider that modifies it, the ' +
+      'procedure that acts on it. Different from search_policy_documents, which starts from a ' +
+      'question; this starts from a document you already have.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      doc_id: z.string().describe('e.g. TRM20-CONTRACT-02'),
+      limit: z.number().int().min(1).max(10).optional().describe('Default 3'),
+    },
+  },
+  async ({ doc_id, limit = 3 }) => {
+    const [source] = await query(
+      'SELECT doc_id, title, doc_type, product_code FROM policy_documents WHERE doc_id = $1',
+      [doc_id],
+    );
+    if (!source) {
+      const available = await query('SELECT doc_id, title FROM policy_documents ORDER BY doc_id');
+      return text({ error: `No document with doc_id ${doc_id}.`, available });
+    }
+
+    // Reuses the embeddings already stored at seed time — no model call needed, because the
+    // source document's position was computed once and kept.
+    const rows = await query(
+      `SELECT d.doc_id, d.title, d.doc_type, d.product_code,
+              1 - (d.embedding <=> s.embedding) AS similarity
+         FROM policy_documents d
+         CROSS JOIN (SELECT embedding FROM policy_documents WHERE doc_id = $1) s
+        WHERE d.doc_id <> $1
+        ORDER BY d.embedding <=> s.embedding
+        LIMIT $2`,
+      [doc_id, limit],
+    );
+
+    return text({
+      source,
+      similar: rows.map((row) => ({ ...row, similarity: Number(Number(row.similarity).toFixed(4)) })),
+      note: 'Similarity is by wording and subject matter. A closely related document may state the opposite rule — read it, do not assume it agrees.',
+    });
+  },
+);
+
+server.registerTool(
+  'get_requirement_catalog',
+  {
+    title: 'Get requirement catalogue',
+    description:
+      'Every requirement type seen across the book, with how often it has been ordered, how many are ' +
+      'still open, and how long the closed ones took. Use this before ordering — it answers "how long ' +
+      'will an APS hold this case up" — and to spot which vendors are slow. ' +
+      'get_outstanding_requirements shows what is open right now; this shows historical behaviour.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {},
+  },
+  async () => {
+    const byCode = await query(
+      `SELECT requirement_code,
+              COUNT(*)::int AS times_ordered,
+              COUNT(*) FILTER (WHERE status = 'outstanding')::int AS currently_outstanding,
+              COUNT(*) FILTER (WHERE status = 'received')::int AS received,
+              COUNT(*) FILTER (WHERE status = 'waived')::int AS waived,
+              ROUND(AVG(EXTRACT(EPOCH FROM (received_at - ordered_at)) / 86400.0)
+                    FILTER (WHERE received_at IS NOT NULL), 1) AS avg_days_to_receive,
+              COUNT(*) FILTER (WHERE received_at IS NOT NULL)::int AS turnaround_sample_size
+         FROM requirements
+        GROUP BY requirement_code
+        ORDER BY times_ordered DESC, requirement_code`,
+    );
+
+    const byVendor = await query(
+      `SELECT vendor,
+              COUNT(*)::int AS ordered,
+              COUNT(*) FILTER (WHERE status = 'outstanding')::int AS still_open,
+              ROUND(AVG(EXTRACT(EPOCH FROM (received_at - ordered_at)) / 86400.0)
+                    FILTER (WHERE received_at IS NOT NULL), 1) AS avg_days_to_receive
+         FROM requirements
+        WHERE vendor IS NOT NULL
+        GROUP BY vendor
+        ORDER BY ordered DESC`,
+    );
+
+    return text({
+      by_requirement: byCode,
+      by_vendor: byVendor,
+      caveat:
+        'Turnaround figures come from a handful of closed requirements — check turnaround_sample_size ' +
+        'before treating any average as typical. A sample of one is an anecdote, not a benchmark.',
+    });
+  },
+);
+
 await server.connect(new StdioServerTransport());

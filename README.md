@@ -6,7 +6,7 @@ LLM agent can call.
 
 The point of the POC: an agent shouldn't need a bespoke integration per assistant. Implement the
 domain once as an MCP server, and any MCP-capable client (Claude Code, Microsoft Foundry agents,
-an internal chat surface) gets the same twenty-two tools with the same contracts.
+an internal chat surface) gets the same twenty-four tools with the same contracts.
 
 All data in this repository is **synthetic**. The schema, products, rules, and documents were
 invented for this demo and are not derived from any production system.
@@ -26,10 +26,10 @@ npm run setup     # starts Postgres+pgvector, seeds the corpus, runs the smoke t
 ```
 
 `npm run setup` is the whole demo: it stands up the database, embeds and inserts 13 documents, then
-connects to the MCP server as a real MCP client and exercises all twenty-two tools. Expected tail:
+connects to the MCP server as a real MCP client and exercises all twenty-four tools. Expected tail:
 
 ```
-Connected. Server exposes 22 tools:
+Connected. Server exposes 24 tools:
   - search_policy_documents: Search policy documents
   - get_application_status: Get application status
   ...
@@ -44,7 +44,7 @@ with `npm run db:down`.
 
 ## The tools
 
-Twenty-two tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
+Twenty-four tools. The design rule: **a tool maps to a decision someone makes, not to a table.** There is no
 `get_product` or `list_events` here — an agent that has to assemble answers from CRUD primitives
 burns turns and invents joins. Each tool below answers a question a person actually asks.
 
@@ -71,6 +71,7 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | `get_underwriter_workload` | "Who is overloaded?" Open cases, face amount at risk, oldest untouched case per underwriter. |
 | `get_pipeline_metrics` | "How are we doing?" Cases and face amount by status, plus outstanding requirements bucketed against the 14 / 28 / 90-day thresholds. |
 | `reassign_application` | "Move this off D. Lindqvist." Reassigns and records why. |
+| `get_requirement_catalog` | "How long will an APS hold this up, and which vendors are slow?" Historical turnaround, with the sample size attached so a single data point isn't mistaken for a benchmark. |
 
 **Sales and pricing** — before a case exists
 
@@ -88,9 +89,10 @@ burns turns and invents joins. Each tool below answers a question a person actua
 | --- | --- |
 | `search_policy_documents` | "What does the contract actually say?" Hybrid search over contracts, riders, guidelines and procedures, returning excerpts with `doc_id` so answers can cite a source. |
 | `list_documents` | "What guidance exists for this product?" Enumerates the corpus without searching — also the fallback when a search returns nothing. |
+| `find_similar_documents` | "What else relates to this clause?" Starts from a document rather than a question, reusing the embeddings already stored. |
 | `get_document` | "Quote me the exact clause." One document in full, since search truncates excerpts at 600 characters. Also returns the product's underwriting rules, which is usually what a reader needs next. |
 
-Fourteen of the twenty-two are read-only and marked `readOnlyHint: true`. The eight writers differ in a
+Sixteen of the twenty-four are read-only and marked `readOnlyHint: true`. The eight writers differ in a
 way the annotations capture, because clients use them to decide what needs human confirmation:
 
 | Tool | Semantics | Annotations |
@@ -192,7 +194,7 @@ involved: this server speaks JSON-RPC 2.0 over its own stdin and stdout.
 **Startup, once per session.** The client (Claude Code, a Foundry agent) *spawns this process* —
 `node src/index.js` — and holds its stdin/stdout pipes. It sends `initialize`, the server replies
 with protocol version and capabilities, the client sends the `initialized` notification. Then the
-client calls `tools/list`, and the SDK answers with all twenty-two tools: name, description, annotations,
+client calls `tools/list`, and the SDK answers with all twenty-four tools: name, description, annotations,
 and a **JSON Schema** for the arguments, which it generated from the zod schemas in `src/index.js`.
 
 **The client puts those tool definitions into the model's context.** This is the step people skip.
@@ -249,7 +251,7 @@ MCP client (Claude Code / Foundry agent)
         Postgres 16 + pgvector      docker-compose, port 55432
 ```
 
-Layout: `src/index.js` (server and all twenty-two tools) · `src/embed.js` (embedding) · `src/db.js`
+Layout: `src/index.js` (server and all twenty-four tools) · `src/embed.js` (embedding) · `src/db.js`
 (pool) · `db/init.sql` (schema + seed) · `scripts/seed.mjs` (documents + embeddings) ·
 `scripts/smoke.mjs` (exercises every tool) · `scripts/demo.mjs` (the chained flow) ·
 `scripts/benchmark.mjs` (retrieval quality).

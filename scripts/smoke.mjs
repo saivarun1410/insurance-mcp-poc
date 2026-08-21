@@ -266,6 +266,16 @@ show(
   }),
 );
 
+show(
+  'find_similar_documents  ->  what sits near the suicide exclusion',
+  await client.callTool({ name: 'find_similar_documents', arguments: { doc_id: 'TRM20-CONTRACT-02' } }),
+);
+
+show(
+  'get_requirement_catalog  ->  turnaround by requirement and by vendor',
+  await client.callTool({ name: 'get_requirement_catalog', arguments: {} }),
+);
+
 await client.close();
 console.log('\nAll tool calls completed.');
 process.exit(0);
